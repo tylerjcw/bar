@@ -1,7 +1,6 @@
 CC	?= gcc
-STRIP ?= strip
-CFLAGS = -std=c99 -fshort-wchar -Os
-LDFLAGS = -lxcb
+CFLAGS = -std=c99 -Os
+LDFLAGS = -lxcb -lxcb-xinerama -lxcb-randr
 CFDEBUG = -g3 -pedantic -Wall -Wunused-parameter -Wlong-long\
 		  -Wsign-conversion -Wconversion -Wimplicit-function-declaration
 
@@ -14,31 +13,28 @@ BINDIR=${PREFIX}/bin
 
 all: ${EXEC}
 
+doc: README.pod
+	pod2man --section=1 --center="bar Manual" --name "bar" --release="bar $(shell git describe --always)" README.pod > bar.1
+
 .c.o:
 	${CC} ${CFLAGS} -o $@ -c $<
 
-${OBJS}: config.h
-
-config.h:
-	@echo creating $@ from config.def.h
-	@cp config.def.h $@
-
 ${EXEC}: ${OBJS}
-	${CC} ${LDFLAGS} -o ${EXEC} ${OBJS}
-	${STRIP} -s ${EXEC}
+	${CC} -o ${EXEC} ${OBJS} ${LDFLAGS}
 
 debug: ${EXEC}
 debug: CC += ${CFDEBUG}
 
 clean:
-	rm -rf ./*.o
-	rm -rf ./${EXEC}
+	rm -f ./*.o ./*.1
+	rm -f ./${EXEC}
 
-install: bar
-	test -d ${DESTDIR}${BINDIR} || mkdir -p ${DESTDIR}${BINDIR}
-	install -m755 bar ${DESTDIR}${BINDIR}/bar
+install: bar doc
+	install -D -m 755 bar ${DESTDIR}${BINDIR}/bar
+	install -D -m 644 bar.1 ${DESTDIR}${PREFIX}/share/man/man1/bar.1
 
 uninstall:
 	rm -f ${DESTDIR}${BINDIR}/bar
+	rm -f $(DESTDIR)$(PREFIX)/share/man/man1/bar.1
 
 .PHONY: all debug clean install
