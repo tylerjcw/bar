@@ -27,13 +27,14 @@ typedef struct font_t {
 } font_t;
 
 typedef struct monitor_t {
-    int x, width;
+    int x, y, width;
     xcb_window_t window;
     xcb_pixmap_t pixmap;
     struct monitor_t *prev, *next;
 } monitor_t;
 
 typedef struct area_t {
+    bool active;
     int begin, end, align, button;
     xcb_window_t window;
     char *cmd;
@@ -219,11 +220,15 @@ set_attribute (const char modifier, const char attribute)
 
 
 area_t *
-area_get (xcb_window_t win, const int x)
+area_get (xcb_window_t win, const int btn, const int x)
 {
-    for (int i = 0; i < astack.pos; i++)
-        if (astack.slot[i].window == win && x >= astack.slot[i].begin && x < astack.slot[i].end)
-            return &astack.slot[i];
+    // Looping backwards ensures that we get the innermost area first
+    for (int i = astack.pos; i >= 0; i--) {
+        area_t *a = &astack.slot[i];
+        if (a->window == win && a->button == btn
+                && x >= a->begin && x < a->end)
+            return a;
+    }
     return NULL;
 }
 
@@ -246,18 +251,18 @@ area_shift (xcb_window_t win, const int align, int delta)
 bool
 area_add (char *str, const char *optend, char **end, monitor_t *mon, const int x, const int align, const int button)
 {
-    char *p = str;
+    int i;
     char *trail;
-    area_t *a = &astack.slot[astack.pos];
-
-    if (astack.pos == N) {
-        fprintf(stderr, "astack overflow!\n");
-        return false;
-    }
+    area_t *a;
 
     // A wild close area tag appeared!
-    if (*p != ':') {
-        *end = p;
+    if (*str != ':') {
+        *end = str;
+
+        // Find most recent unclosed area.
+        for (i = astack.pos - 1; i >= 0 && !astack.slot[i].active; i--)
+            ;
+        a = &astack.slot[i];
 
         // Basic safety checks
         if (!a->cmd || a->align != align || a->window != mon->window)
@@ -280,25 +285,30 @@ area_add (char *str, const char *optend, char **end, monitor_t *mon, const int x
                 break;
         }
 
-        astack.pos++;
-
+        a->active = false;
         return true;
     }
 
+    if (astack.pos >= N) {
+        fprintf(stderr, "astack overflow!\n");
+        return false;
+    }
+    a = &astack.slot[astack.pos++];
+
     // Found the closing : and check if it's just an escaped one
-    for (trail = strchr(++p, ':'); trail && trail[-1] == '\\'; trail = strchr(trail + 1, ':'))
+    for (trail = strchr(++str, ':'); trail && trail[-1] == '\\'; trail = strchr(trail + 1, ':'))
         ;
 
-    // Find the trailing : and make sure it's whitin the formatting block, also reject empty commands
-    if (!trail || p == trail || trail > optend) {
-        *end = p;
+    // Find the trailing : and make sure it's within the formatting block, also reject empty commands
+    if (!trail || str == trail || trail > optend) {
+        *end = str;
         return false;
     }
 
     *trail = '\0';
 
     // Sanitize the user command by unescaping all the :
-    for (char *needle = p; *needle; needle++) {
+    for (char *needle = str; *needle; needle++) {
         int delta = trail - &needle[1];
         if (needle[0] == '\\' && needle[1] == ':') {
             memmove(&needle[0], &needle[1], delta);
@@ -307,7 +317,8 @@ area_add (char *str, const char *optend, char **end, monitor_t *mon, const int x
     }
 
     // This is a pointer to the string buffer allocated in the main
-    a->cmd = p;
+    a->cmd = str;
+    a->active = true;
     a->align = align;
     a->begin = x;
     a->window = mon->window;
@@ -422,7 +433,9 @@ parse (char *text)
 
                     case 'T':
                               font_index = (int)strtoul(p, NULL, 10);
-                              if (!font_index || font_index >= font_count)
+                              // User-specified 'font_index' ∊ (0,font_count]
+                              // Otherwise just fallback to the automatic font selection
+                              if (!font_index || font_index > font_count)
                                   font_index = -1;
                               p = end;
                               break;
@@ -591,6 +604,7 @@ set_ewmh_atoms (void)
         xcb_change_property(c, XCB_PROP_MODE_REPLACE, mon->window, atom_list[NET_WM_DESKTOP], XCB_ATOM_CARDINAL, 32, 1, (const uint32_t []){ -1 } );
         xcb_change_property(c, XCB_PROP_MODE_REPLACE, mon->window, atom_list[NET_WM_STRUT_PARTIAL], XCB_ATOM_CARDINAL, 32, 12, strut);
         xcb_change_property(c, XCB_PROP_MODE_REPLACE, mon->window, atom_list[NET_WM_STRUT], XCB_ATOM_CARDINAL, 32, 4, strut);
+        xcb_change_property(c, XCB_PROP_MODE_REPLACE, mon->window, XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 8, 3, "bar");
     }
 }
 
@@ -606,15 +620,14 @@ monitor_new (int x, int y, int width, int height)
     }
 
     ret->x = x;
+    ret->y = (topbar ? by : height - bh - by) + y;
     ret->width = width;
     ret->next = ret->prev = NULL;
-
-    int win_y = (topbar ? by : height - bh - by) + y;
     ret->window = xcb_generate_id(c);
 
     int depth = (visual == scr->root_visual) ? XCB_COPY_FROM_PARENT : 32;
     xcb_create_window(c, depth, ret->window, scr->root,
-            x, win_y, width, bh, 0,
+            ret->x, ret->y, width, bh, 0,
             XCB_WINDOW_CLASS_INPUT_OUTPUT, visual,
             XCB_CW_BACK_PIXEL | XCB_CW_BORDER_PIXEL | XCB_CW_OVERRIDE_REDIRECT | XCB_CW_EVENT_MASK | XCB_CW_COLORMAP,
             (const uint32_t []){ bgc, bgc, dock, XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_BUTTON_PRESS, colormap });
@@ -800,11 +813,11 @@ get_randr_monitors (void)
         return;
     }
 
-	xcb_rectangle_t r[valid];
+    xcb_rectangle_t r[valid];
 
-	for (i = j = 0; i < num && j < valid; i++)
-		if (rects[i].width != 0)
-			r[j++] = rects[i];
+    for (i = j = 0; i < num && j < valid; i++)
+        if (rects[i].width != 0)
+            r[j++] = rects[i];
 
     monitor_create_chain(r, valid);
 }
@@ -1048,6 +1061,10 @@ init (void)
     for (monitor_t *mon = monhead; mon; mon = mon->next) {
         fill_rect(mon->pixmap, gc[GC_CLEAR], 0, 0, mon->width, bh);
         xcb_map_window(c, mon->window);
+
+        // Make sure that the window really gets in the place it's supposed to be
+        // Some WM such as Openbox need this
+        xcb_configure_window(c, mon->window, XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, (const uint32_t []){ mon->x, mon->y });
     }
 
     xcb_flush(c);
@@ -1185,9 +1202,9 @@ main (int argc, char **argv)
                         case XCB_BUTTON_PRESS:
                             press_ev = (xcb_button_press_event_t *)ev;
                             {
-                                area_t *area = area_get(press_ev->event, press_ev->event_x);
+                                area_t *area = area_get(press_ev->event, press_ev->detail, press_ev->event_x);
                                 // Respond to the click
-                                if (area && area->button == press_ev->detail) {
+                                if (area) {
                                     write(STDOUT_FILENO, area->cmd, strlen(area->cmd));
                                     write(STDOUT_FILENO, "\n", 1);
                                 }
